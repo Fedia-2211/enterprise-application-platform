@@ -1,0 +1,23 @@
+---
+- name: Install EPEL repository (CentOS)
+  ansible.builtin.dnf:
+    name: epel-release
+    state: present
+
+- name: Install common packages (CentOS/RHEL)
+  ansible.builtin.dnf:
+    name:
+      - curl
+      - wget
+      - git
+      - unzip
+      - vim
+      - htop
+      - net-tools
+      - chrony
+      - fail2ban
+      - firewalld
+      - python3-pip
+      - jq
+      - logrotate
+    state: present

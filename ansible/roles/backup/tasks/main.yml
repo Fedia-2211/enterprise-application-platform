@@ -1,0 +1,66 @@
+---
+# roles/backup/tasks/main.yml
+
+- name: Create backup directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+  loop:
+    - /opt/backup
+    - /opt/backup/scripts
+    - /opt/backup/logs
+
+- name: Deploy MySQL backup script
+  ansible.builtin.template:
+    src: mysql_backup.sh.j2
+    dest: /opt/backup/scripts/mysql_backup.sh
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy application data backup script
+  ansible.builtin.template:
+    src: app_backup.sh.j2
+    dest: /opt/backup/scripts/app_backup.sh
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Deploy backup verification script
+  ansible.builtin.template:
+    src: verify_backup.sh.j2
+    dest: /opt/backup/scripts/verify_backup.sh
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Schedule daily MySQL backup (02:00 UTC)
+  ansible.builtin.cron:
+    name: "Daily MySQL backup"
+    user: root
+    hour: "2"
+    minute: "0"
+    job: "/opt/backup/scripts/mysql_backup.sh >> /opt/backup/logs/mysql_backup.log 2>&1"
+    state: present
+
+- name: Schedule weekly full backup (Sunday 03:00 UTC)
+  ansible.builtin.cron:
+    name: "Weekly full backup"
+    user: root
+    weekday: "0"
+    hour: "3"
+    minute: "0"
+    job: "/opt/backup/scripts/mysql_backup.sh full >> /opt/backup/logs/mysql_backup_full.log 2>&1"
+    state: present
+
+- name: Schedule backup verification (daily 04:00 UTC)
+  ansible.builtin.cron:
+    name: "Verify backup integrity"
+    user: root
+    hour: "4"
+    minute: "0"
+    job: "/opt/backup/scripts/verify_backup.sh >> /opt/backup/logs/verify.log 2>&1"
+    state: present

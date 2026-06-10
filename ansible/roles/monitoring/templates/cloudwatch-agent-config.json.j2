@@ -1,0 +1,150 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root",
+    "logfile": "/opt/aws/amazon-cloudwatch-agent/logs/amazon-cloudwatch-agent.log"
+  },
+  "metrics": {
+    "namespace": "{{ cloudwatch_metrics_namespace }}",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}",
+      "InstanceType": "${aws:InstanceType}",
+      "AutoScalingGroupName": "${aws:AutoScalingGroupName}"
+    },
+    "aggregation_dimensions": [["InstanceId"]],
+    "metrics_collected": {
+      "cpu": {
+        "measurement": [
+          "cpu_usage_idle",
+          "cpu_usage_user",
+          "cpu_usage_system",
+          "cpu_usage_iowait"
+        ],
+        "metrics_collection_interval": 60,
+        "totalcpu": true
+      },
+      "disk": {
+        "measurement": [
+          "used_percent",
+          "inodes_free"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": ["*"],
+        "ignore_file_system_types": ["tmpfs", "devtmpfs", "overlay"]
+      },
+      "diskio": {
+        "measurement": [
+          "reads",
+          "writes",
+          "read_bytes",
+          "write_bytes",
+          "read_time",
+          "write_time",
+          "io_time"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": ["*"]
+      },
+      "mem": {
+        "measurement": [
+          "mem_used_percent",
+          "mem_available",
+          "mem_total",
+          "mem_cached"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "net": {
+        "measurement": [
+          "bytes_sent",
+          "bytes_recv",
+          "packets_sent",
+          "packets_recv",
+          "err_in",
+          "err_out"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": ["eth0"]
+      },
+      "netstat": {
+        "measurement": [
+          "tcp_established",
+          "tcp_time_wait",
+          "tcp_close_wait"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "processes": {
+        "measurement": [
+          "running",
+          "sleeping",
+          "dead"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "swap": {
+        "measurement": ["swap_used_percent"],
+        "metrics_collection_interval": 60
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/syslog",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/syslog",
+            "log_stream_name": "{instance_id}",
+            "timestamp_format": "%b %d %H:%M:%S",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/var/log/auth.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/auth",
+            "log_stream_name": "{instance_id}",
+            "timestamp_format": "%b %d %H:%M:%S",
+            "retention_in_days": 90
+          },
+          {
+            "file_path": "/var/log/nginx/gitea-access.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/nginx-access",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/var/log/nginx/gitea-error.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/nginx-error",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/var/log/gitea/gitea.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/gitea",
+            "log_stream_name": "{instance_id}",
+            "timestamp_format": "%Y/%m/%d %H:%M:%S",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/var/log/mysql/error.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/mysql-error",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/var/log/mysql/slow-query.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/mysql-slow",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 30
+          },
+          {
+            "file_path": "/opt/backup/logs/mysql_backup.log",
+            "log_group_name": "{{ cloudwatch_log_group_prefix }}/backup",
+            "log_stream_name": "{instance_id}",
+            "retention_in_days": 90
+          }
+        ]
+      }
+    }
+  }
+}

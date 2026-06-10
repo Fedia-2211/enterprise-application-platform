@@ -1,0 +1,23 @@
+## /etc/rabbitmq/rabbitmq.conf
+## Managed by Ansible
+
+# Networking
+listeners.tcp.default        = {{ rabbitmq_amqp_port }}
+management.tcp.port          = {{ rabbitmq_management_port }}
+management.tcp.ip            = {{ ansible_default_ipv4.address }}
+
+# Resource limits
+vm_memory_high_watermark.relative = 0.6
+disk_free_limit.absolute     = 1GB
+
+# Logging
+log.file.level               = info
+log.file                     = /var/log/rabbitmq/rabbit.log
+
+# Default vhost
+default_vhost                = {{ rabbitmq_vhost }}
+default_user                 = {{ rabbitmq_user }}
+
+# Security: disable cleartext connections if desired
+# listeners.tcp                = none
+# listeners.ssl.default        = 5671

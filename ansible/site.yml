@@ -1,0 +1,63 @@
+---
+# site.yml — master playbook
+# Run: ansible-playbook -i inventories/production/hosts.yml site.yml
+# Run specific tags: ansible-playbook ... --tags "common,nginx"
+
+- name: Apply common hardening to all hosts
+  hosts: all
+  become: true
+  gather_facts: true
+  tags: [common]
+  roles:
+    - common
+    - monitoring
+
+- name: Configure Nginx reverse proxy
+  hosts: app_servers
+  become: true
+  tags: [nginx]
+  roles:
+    - nginx
+
+- name: Configure MySQL database server
+  hosts: database
+  become: true
+  tags: [mysql]
+  roles:
+    - mysql
+    - backup
+
+- name: Configure RabbitMQ
+  hosts: message_queue
+  become: true
+  tags: [rabbitmq]
+  roles:
+    - rabbitmq
+
+- name: Configure Memcached
+  hosts: cache
+  become: true
+  tags: [memcached]
+  roles:
+    - memcached
+
+- name: Deploy Gitea application
+  hosts: app_servers
+  become: true
+  tags: [app]
+  roles:
+    - app
+
+- name: Configure Jenkins CI/CD server
+  hosts: tools
+  become: true
+  tags: [jenkins]
+  roles:
+    - jenkins
+
+- name: Configure monitoring agents
+  hosts: all
+  become: true
+  tags: [monitoring]
+  roles:
+    - monitoring

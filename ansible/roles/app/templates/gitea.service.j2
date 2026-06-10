@@ -1,0 +1,26 @@
+[Unit]
+Description=Gitea (Git with a cup of tea)
+After=network.target mysqld.service
+Wants=network.target
+
+[Service]
+RestartSec=2s
+Type=simple
+User={{ gitea_user }}
+Group={{ gitea_group }}
+WorkingDirectory={{ gitea_home }}
+ExecStart=/usr/local/bin/gitea web --config {{ gitea_config_dir }}/app.ini
+Restart=always
+Environment=USER={{ gitea_user }} HOME={{ gitea_home }} GITEA_WORK_DIR={{ gitea_data_dir }}
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=false
+
+# Limits
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+[Install]
+WantedBy=multi-user.target

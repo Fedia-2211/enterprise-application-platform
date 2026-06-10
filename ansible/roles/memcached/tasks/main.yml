@@ -1,0 +1,52 @@
+---
+# roles/memcached/tasks/main.yml
+
+- name: Install Memcached
+  ansible.builtin.apt:
+    name:
+      - memcached
+      - libmemcached-tools
+    state: present
+    update_cache: true
+
+- name: Deploy Memcached configuration
+  ansible.builtin.template:
+    src: memcached.conf.j2
+    dest: /etc/memcached.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart memcached
+
+- name: Restart Memcached to apply config
+  ansible.builtin.service:
+    name: memcached
+    state: restarted
+  when: memcached_config.changed
+
+- name: Start and enable Memcached
+  ansible.builtin.service:
+    name: memcached
+    state: started
+    enabled: true
+
+- name: Wait for Memcached port
+  ansible.builtin.wait_for:
+    port: "{{ memcached_port }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 3
+    timeout: 30
+
+- name: Verify Memcached is responding
+  ansible.builtin.shell: |
+    echo "stats" | nc -q 1 {{ ansible_default_ipv4.address }} {{ memcached_port }} | head -5
+  changed_when: false
+  register: memcached_stats
+  failed_when: "'STAT' not in memcached_stats.stdout"
+
+- name: Open Memcached port in UFW (app subnet only)
+  community.general.ufw:
+    rule: allow
+    port: "{{ memcached_port }}"
+    proto: tcp
+    src: "10.0.2.0/24"

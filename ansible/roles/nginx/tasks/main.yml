@@ -1,0 +1,63 @@
+---
+# roles/nginx/tasks/main.yml
+
+- name: Install Nginx
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+    update_cache: true
+
+- name: Remove default Nginx site
+  ansible.builtin.file:
+    path: /etc/nginx/sites-enabled/default
+    state: absent
+
+- name: Configure Nginx main config
+  ansible.builtin.template:
+    src: nginx.conf.j2
+    dest: /etc/nginx/nginx.conf
+    mode: "0644"
+    validate: nginx -t -c %s
+  notify: reload nginx
+
+- name: Deploy application virtual host config
+  ansible.builtin.template:
+    src: gitea.conf.j2
+    dest: /etc/nginx/sites-available/gitea.conf
+    mode: "0644"
+  notify: reload nginx
+
+- name: Enable application site
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/gitea.conf
+    dest: /etc/nginx/sites-enabled/gitea.conf
+    state: link
+  notify: reload nginx
+
+- name: Open HTTP port in UFW
+  community.general.ufw:
+    rule: allow
+    port: "80"
+    proto: tcp
+
+- name: Open HTTPS port in UFW (for direct if needed)
+  community.general.ufw:
+    rule: allow
+    port: "443"
+    proto: tcp
+
+- name: Open app port in UFW (from ALB SG — controlled at AWS level)
+  community.general.ufw:
+    rule: allow
+    port: "3000"
+    proto: tcp
+
+- name: Start and enable Nginx
+  ansible.builtin.service:
+    name: nginx
+    state: started
+    enabled: true
+
+- name: Validate Nginx config
+  ansible.builtin.command: nginx -t
+  changed_when: false

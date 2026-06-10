@@ -1,0 +1,10 @@
+variable "project_name"       { type = string }
+variable "environment"         { type = string }
+variable "vpc_cidr"            { type = string }
+variable "public_subnet_cidr"  { type = string }
+variable "app_subnet_cidr"     { type = string }
+variable "tools_subnet_cidr"   { type = string }
+variable "data_subnet_cidr"    { type = string }
+variable "availability_zone"   { type = string }
+variable "aws_region"          { type = string }
+variable "public_subnet_cidr_2" { type = string }

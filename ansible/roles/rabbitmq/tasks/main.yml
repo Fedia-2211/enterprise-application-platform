@@ -1,0 +1,94 @@
+---
+- name: Install prerequisites
+  ansible.builtin.apt:
+    name:
+      - curl
+      - gnupg
+      - apt-transport-https
+    state: present
+    update_cache: true
+
+- name: Download RabbitMQ signing script and install
+  ansible.builtin.shell: |
+    curl -1sLf "https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-erlang/setup.deb.sh" | bash
+    curl -1sLf "https://dl.cloudsmith.io/public/rabbitmq/rabbitmq-server/setup.deb.sh" | bash
+  args:
+    creates: /etc/apt/sources.list.d/rabbitmq_rabbitmq-server.list
+
+- name: Install Erlang and RabbitMQ
+  ansible.builtin.apt:
+    name:
+      - erlang-base
+      - erlang-asn1
+      - erlang-crypto
+      - erlang-eldap
+      - erlang-ftp
+      - erlang-inets
+      - erlang-mnesia
+      - erlang-os-mon
+      - erlang-parsetools
+      - erlang-public-key
+      - erlang-runtime-tools
+      - erlang-snmp
+      - erlang-ssl
+      - erlang-syntax-tools
+      - erlang-tftp
+      - erlang-tools
+      - erlang-xmerl
+      - rabbitmq-server
+    state: present
+    update_cache: true
+
+- name: Enable RabbitMQ management plugin
+  community.rabbitmq.rabbitmq_plugin:
+    names: rabbitmq_management
+    state: enabled
+  notify: restart rabbitmq
+
+- name: Start and enable RabbitMQ
+  ansible.builtin.service:
+    name: rabbitmq-server
+    state: started
+    enabled: true
+
+- name: Wait for RabbitMQ to be ready
+  ansible.builtin.wait_for:
+    port: "{{ rabbitmq_amqp_port }}"
+    host: "{{ ansible_default_ipv4.address }}"
+    delay: 5
+    timeout: 60
+
+- name: Remove default guest user
+  community.rabbitmq.rabbitmq_user:
+    user: guest
+    state: absent
+
+- name: Create application vhost
+  community.rabbitmq.rabbitmq_vhost:
+    name: "{{ rabbitmq_vhost }}"
+    state: present
+
+- name: Create application RabbitMQ user
+  community.rabbitmq.rabbitmq_user:
+    user: "{{ rabbitmq_user }}"
+    password: "{{ rabbitmq_password }}"
+    vhost: "{{ rabbitmq_vhost }}"
+    configure_priv: ".*"
+    read_priv: ".*"
+    write_priv: ".*"
+    state: present
+  no_log: true
+
+- name: Open AMQP port in UFW (from app subnet only)
+  community.general.ufw:
+    rule: allow
+    port: "{{ rabbitmq_amqp_port }}"
+    proto: tcp
+    src: "10.0.2.0/24"
+
+- name: Open management port in UFW (from tools subnet)
+  community.general.ufw:
+    rule: allow
+    port: "{{ rabbitmq_management_port }}"
+    proto: tcp
+    src: "10.0.3.0/24"

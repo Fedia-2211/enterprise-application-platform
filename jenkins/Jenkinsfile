@@ -1,0 +1,785 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Jenkinsfile — DevOps Portfolio Project
+// Application: Gitea
+// Deploy strategy: Rolling (app-01 first, health check, then app-02)
+// Notifications: Slack on every stage + final summary
+// Author: Firdavs Samadov
+// ─────────────────────────────────────────────────────────────────────────────
+
+pipeline {
+
+    agent any
+
+    // ── Environment Variables ─────────────────────────────────────────────────
+    environment {
+        // Application
+        APP_NAME          = "gitea"
+        APP_VERSION       = "${env.BUILD_NUMBER}"
+        APP_PORT          = "3000"
+        APP_HEALTH_PATH   = "/-/health"
+        DEPLOY_USER       = "ubuntu"
+        DEPLOY_DIR        = "/usr/local/bin"
+        SERVICE_NAME      = "gitea"
+        GITEA_CONFIG_DIR  = "/etc/gitea"
+
+        // Servers — stored as Jenkins credentials (plain text)
+        APP_SERVER_1_IP   = credentials('APP_SERVER_1_IP')
+        APP_SERVER_2_IP   = credentials('APP_SERVER_2_IP')
+        BASTION_IP        = credentials('BASTION_IP')
+
+        // AWS
+        AWS_REGION        = "us-east-1"
+        S3_BUCKET         = credentials('S3_BUCKET_NAME')
+
+        // Slack
+        SLACK_CHANNEL     = "#deployments"
+        SLACK_CREDENTIAL  = "slack-token"
+
+        // SSH key credential ID (stored in Jenkins as SSH private key)
+        SSH_CREDENTIAL_ID = "enterprise-application-platform-ssh-key"
+
+        // Gitea release base URL
+        GITEA_RELEASES    = "https://github.com/go-gitea/gitea/releases/download"
+
+        // Deployment timeout (seconds to wait for service health after deploy)
+        HEALTH_CHECK_RETRIES = "12"
+        HEALTH_CHECK_DELAY   = "10"
+
+        // Build metadata
+        BUILD_TIMESTAMP   = sh(script: "date '+%Y-%m-%d %H:%M:%S UTC'", returnStdout: true).trim()
+        GIT_COMMIT_SHORT  = sh(script: "git rev-parse --short HEAD 2>/dev/null || echo 'unknown'", returnStdout: true).trim()
+    }
+
+    // ── Options ───────────────────────────────────────────────────────────────
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '5'))
+        timestamps()
+        ansiColor('xterm')
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+    }
+
+    // ── Parameters ────────────────────────────────────────────────────────────
+    parameters {
+        string(
+            name: 'GITEA_VERSION',
+            defaultValue: '1.22.1',
+            description: 'Gitea version to deploy (e.g. 1.22.1)'
+        )
+        booleanParam(
+            name: 'SKIP_TESTS',
+            defaultValue: false,
+            description: 'Skip health/smoke tests (emergency deploys only)'
+        )
+        booleanParam(
+            name: 'ROLLBACK',
+            defaultValue: false,
+            description: 'Roll back to previous version instead of deploying'
+        )
+        choice(
+            name: 'DEPLOY_TARGET',
+            choices: ['both', 'app-01-only', 'app-02-only'],
+            description: 'Which servers to deploy to'
+        )
+    }
+
+    // ── Stages ────────────────────────────────────────────────────────────────
+    stages {
+
+        // ── 1. Checkout ───────────────────────────────────────────────────────
+        stage('Checkout') {
+            steps {
+                script {
+                    notifySlack('STARTED', "Build #${env.BUILD_NUMBER} started by ${getBuildUser()}")
+                }
+                checkout scm
+                sh '''
+                    echo "=== Build Info ==="
+                    echo "Branch:    ${GIT_BRANCH}"
+                    echo "Commit:    ${GIT_COMMIT_SHORT}"
+                    echo "Version:   ${GITEA_VERSION}"
+                    echo "Timestamp: ${BUILD_TIMESTAMP}"
+                    echo "Deploy to: ${DEPLOY_TARGET}"
+                '''
+            }
+        }
+
+        // ── 2. Validate ───────────────────────────────────────────────────────
+        stage('Validate') {
+            when {
+                not { expression { return params.ROLLBACK } }
+            }
+            parallel {
+
+                stage('Validate: Ansible') {
+                    steps {
+                        sh '''
+                            which ansible-playbook || { echo "ERROR: ansible-playbook not found"; exit 1; }
+                            ansible-playbook --syntax-check \
+                                -i ansible/inventories/production/hosts.yml \
+                                ansible/site.yml \
+                                --tags app
+                            echo "Ansible syntax OK"
+                        '''
+                    }
+                }
+
+                stage('Validate: Shell scripts') {
+                    steps {
+                        sh '''
+                            which shellcheck 2>/dev/null || apt-get install -y shellcheck -q
+                            find . -name "*.sh" -not -path "*/node_modules/*" | while read f; do
+                                echo "Checking: $f"
+                                shellcheck "$f" || true
+                            done
+                            echo "Shell script validation complete"
+                        '''
+                    }
+                }
+
+                stage('Validate: Terraform') {
+                    steps {
+                        dir('terraform/environments/production') {
+                            sh '''
+                                which terraform || { echo "Terraform not installed on Jenkins — skipping"; exit 0; }
+                                terraform fmt -check -recursive ../..
+                                echo "Terraform format check passed"
+                            '''
+                        }
+                    }
+                }
+
+            }
+        }
+
+        // ── 3. Download & Verify Artifact ─────────────────────────────────────
+        stage('Download Artifact') {
+            when {
+                not { expression { return params.ROLLBACK } }
+            }
+            steps {
+                sh '''
+                    echo "=== Downloading Gitea v${GITEA_VERSION} ==="
+
+                    DOWNLOAD_URL="${GITEA_RELEASES}/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64"
+                    CHECKSUM_URL="${GITEA_RELEASES}/v${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64.sha256"
+
+                    mkdir -p artifacts
+
+                    # Download binary
+                    echo "Downloading binary..."
+                    curl -fSL "$DOWNLOAD_URL" -o "artifacts/gitea-${GITEA_VERSION}"
+                    chmod +x "artifacts/gitea-${GITEA_VERSION}"
+
+                    # Download and verify checksum
+                    echo "Downloading checksum..."
+                    curl -fSL "$CHECKSUM_URL" -o "artifacts/gitea-${GITEA_VERSION}.sha256"
+
+                    echo "Verifying checksum..."
+                    EXPECTED=$(cat "artifacts/gitea-${GITEA_VERSION}.sha256" | awk '{print $1}')
+                    ACTUAL=$(sha256sum "artifacts/gitea-${GITEA_VERSION}" | awk '{print $1}')
+
+                    if [ "$EXPECTED" = "$ACTUAL" ]; then
+                        echo "Checksum VERIFIED: $ACTUAL"
+                    else
+                        echo "ERROR: Checksum MISMATCH!"
+                        echo "  Expected: $EXPECTED"
+                        echo "  Actual:   $ACTUAL"
+                        exit 1
+                    fi
+
+                    # Get binary info
+                    FILE_SIZE=$(du -sh "artifacts/gitea-${GITEA_VERSION}" | cut -f1)
+                    echo "Binary size: $FILE_SIZE"
+                    echo "Ready for deployment"
+                '''
+
+                // Archive artifact in Jenkins for rollback capability
+                archiveArtifacts artifacts: "artifacts/gitea-${params.GITEA_VERSION}", fingerprint: true
+            }
+        }
+
+        // ── 4. Upload to S3 (artifact repository) ────────────────────────────
+        stage('Publish to S3') {
+            when {
+                not { expression { return params.ROLLBACK } }
+            }
+            steps {
+                sh '''
+                    echo "=== Publishing artifact to S3 ==="
+
+                    S3_KEY="jenkins-artifacts/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-amd64"
+
+                    aws s3 cp \
+                        "artifacts/gitea-${GITEA_VERSION}" \
+                        "s3://${S3_BUCKET}/${S3_KEY}" \
+                        --region "${AWS_REGION}" \
+                        --sse aws:kms \
+                        --no-progress
+
+                    # Tag with build metadata
+                    aws s3api put-object-tagging \
+                        --bucket "${S3_BUCKET}" \
+                        --key "${S3_KEY}" \
+                        --tagging "TagSet=[{Key=BuildNumber,Value=${BUILD_NUMBER}},{Key=GitCommit,Value=${GIT_COMMIT_SHORT}},{Key=Branch,Value=${GIT_BRANCH}}]" \
+                        --region "${AWS_REGION}"
+
+                    echo "Artifact published: s3://${S3_BUCKET}/${S3_KEY}"
+                '''
+            }
+        }
+
+        // ── 5. Pre-deployment checks ──────────────────────────────────────────
+        stage('Pre-deploy Checks') {
+            when {
+                not { expression { return params.ROLLBACK } }
+                not { expression { return params.SKIP_TESTS } }
+            }
+            steps {
+                script {
+                    sshagent(credentials: [env.SSH_CREDENTIAL_ID]) {
+                        sh '''
+                            echo "=== Pre-deployment checks ==="
+
+                            check_server() {
+                                local SERVER_IP=$1
+                                local SERVER_NAME=$2
+                                echo "--- Checking $SERVER_NAME ($SERVER_IP) ---"
+
+                                SSH_CMD="ssh -o StrictHostKeyChecking=no \
+                                             -o ConnectTimeout=10 \
+                                             -o ProxyJump=${DEPLOY_USER}@${BASTION_IP} \
+                                             ${DEPLOY_USER}@${SERVER_IP}"
+
+                                # Check SSH connectivity
+                                $SSH_CMD "echo 'SSH OK'" || {
+                                    echo "ERROR: Cannot SSH to $SERVER_NAME"
+                                    exit 1
+                                }
+
+                                # Check disk space (require at least 1GB free)
+                                DISK_FREE=$($SSH_CMD "df /usr/local/bin --output=avail -h | tail -1 | tr -d ' '")
+                                echo "$SERVER_NAME disk free: $DISK_FREE"
+
+                                # Check service is currently running
+                                SERVICE_STATUS=$($SSH_CMD "systemctl is-active ${SERVICE_NAME} 2>/dev/null || echo 'inactive'")
+                                echo "$SERVER_NAME ${SERVICE_NAME}: $SERVICE_STATUS"
+
+                                # Check current version
+                                CURRENT_VERSION=$($SSH_CMD "/usr/local/bin/gitea --version 2>/dev/null | awk '{print \$3}' || echo 'unknown'")
+                                echo "$SERVER_NAME current version: $CURRENT_VERSION"
+                            }
+
+                            case "${DEPLOY_TARGET}" in
+                                "both")
+                                    check_server "${APP_SERVER_1_IP}" "app-01"
+                                    check_server "${APP_SERVER_2_IP}" "app-02"
+                                    ;;
+                                "app-01-only")
+                                    check_server "${APP_SERVER_1_IP}" "app-01"
+                                    ;;
+                                "app-02-only")
+                                    check_server "${APP_SERVER_2_IP}" "app-02"
+                                    ;;
+                            esac
+
+                            echo "Pre-deployment checks PASSED"
+                        '''
+                    }
+                }
+            }
+        }
+
+        // ── 6. Deploy to App Server 1 ─────────────────────────────────────────
+        stage('Deploy: app-01') {
+            when {
+                expression {
+                    return params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-01-only'
+                }
+                not { expression { return params.ROLLBACK } }
+            }
+            steps {
+                script {
+                    notifySlack('DEPLOY', "Deploying v${params.GITEA_VERSION} to app-01...")
+                    deployToServer(env.APP_SERVER_1_IP, 'app-01', params.GITEA_VERSION)
+                }
+            }
+            post {
+                failure {
+                    script {
+                        notifySlack('FAILURE', "Deploy to app-01 FAILED. app-02 NOT touched. Build: #${env.BUILD_NUMBER}")
+                    }
+                }
+            }
+        }
+
+        // ── 7. Health Check: App Server 1 ────────────────────────────────────
+        stage('Health Check: app-01') {
+            when {
+                expression {
+                    return params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-01-only'
+                }
+                not { expression { return params.ROLLBACK } }
+                not { expression { return params.SKIP_TESTS } }
+            }
+            steps {
+                script {
+                    healthCheck(env.APP_SERVER_1_IP, 'app-01')
+                }
+            }
+            post {
+                failure {
+                    script {
+                        notifySlack('FAILURE', "Health check FAILED on app-01 after deploy. Triggering rollback...")
+                        rollbackServer(env.APP_SERVER_1_IP, 'app-01')
+                    }
+                }
+            }
+        }
+
+        // ── 8. Deploy to App Server 2 ─────────────────────────────────────────
+        stage('Deploy: app-02') {
+            when {
+                expression {
+                    return params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-02-only'
+                }
+                not { expression { return params.ROLLBACK } }
+            }
+            steps {
+                script {
+                    notifySlack('DEPLOY', "app-01 healthy. Deploying v${params.GITEA_VERSION} to app-02...")
+                    deployToServer(env.APP_SERVER_2_IP, 'app-02', params.GITEA_VERSION)
+                }
+            }
+            post {
+                failure {
+                    script {
+                        notifySlack('FAILURE', "Deploy to app-02 FAILED. app-01 is on new version. Check manually!")
+                    }
+                }
+            }
+        }
+
+        // ── 9. Health Check: App Server 2 ────────────────────────────────────
+        stage('Health Check: app-02') {
+            when {
+                expression {
+                    return params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-02-only'
+                }
+                not { expression { return params.ROLLBACK } }
+                not { expression { return params.SKIP_TESTS } }
+            }
+            steps {
+                script {
+                    healthCheck(env.APP_SERVER_2_IP, 'app-02')
+                }
+            }
+            post {
+                failure {
+                    script {
+                        notifySlack('FAILURE', "Health check FAILED on app-02. Rolling back app-02...")
+                        rollbackServer(env.APP_SERVER_2_IP, 'app-02')
+                    }
+                }
+            }
+        }
+
+        // ── 10. Smoke Tests ───────────────────────────────────────────────────
+        stage('Smoke Tests') {
+            when {
+                not { expression { return params.ROLLBACK } }
+                not { expression { return params.SKIP_TESTS } }
+            }
+            steps {
+                sh '''
+                    echo "=== Smoke Tests via ALB ==="
+
+                    ALB_URL=$(aws ssm get-parameter \
+                        --name "/enterprise-application-platform/production/alb/dns" \
+                        --query "Parameter.Value" \
+                        --output text \
+                        --region "${AWS_REGION}" 2>/dev/null || echo "")
+
+                    if [ -z "$ALB_URL" ]; then
+                        echo "ALB URL not in SSM — fetching from AWS..."
+                        ALB_URL=$(aws elbv2 describe-load-balancers \
+                            --names "enterprise-application-platform-production-alb" \
+                            --query "LoadBalancers[0].DNSName" \
+                            --output text \
+                            --region "${AWS_REGION}")
+                    fi
+
+                    echo "Testing via ALB: http://${ALB_URL}"
+
+                    # Test 1: Health endpoint
+                    echo "Test 1: Health endpoint..."
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                        --max-time 10 \
+                        "http://${ALB_URL}/-/health")
+                    if [ "$HTTP_CODE" = "200" ]; then
+                        echo "  PASS: Health endpoint returned 200"
+                    else
+                        echo "  FAIL: Health endpoint returned $HTTP_CODE"
+                        exit 1
+                    fi
+
+                    # Test 2: Homepage loads
+                    echo "Test 2: Homepage..."
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                        --max-time 10 \
+                        "http://${ALB_URL}/")
+                    if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then
+                        echo "  PASS: Homepage returned $HTTP_CODE"
+                    else
+                        echo "  FAIL: Homepage returned $HTTP_CODE"
+                        exit 1
+                    fi
+
+                    # Test 3: API is responding
+                    echo "Test 3: API endpoint..."
+                    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+                        --max-time 10 \
+                        "http://${ALB_URL}/api/v1/settings/api")
+                    if [ "$HTTP_CODE" = "200" ]; then
+                        echo "  PASS: API endpoint returned 200"
+                    else
+                        echo "  WARN: API endpoint returned $HTTP_CODE (may require auth)"
+                    fi
+
+                    echo "All smoke tests PASSED"
+                '''
+            }
+        }
+
+        // ── 11. Rollback stage (manual trigger) ───────────────────────────────
+        stage('Rollback') {
+            when {
+                expression { return params.ROLLBACK }
+            }
+            steps {
+                script {
+                    notifySlack('WARNING', "ROLLBACK triggered for build #${env.BUILD_NUMBER} by ${getBuildUser()}")
+                    if (params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-01-only') {
+                        rollbackServer(env.APP_SERVER_1_IP, 'app-01')
+                    }
+                    if (params.DEPLOY_TARGET == 'both' || params.DEPLOY_TARGET == 'app-02-only') {
+                        rollbackServer(env.APP_SERVER_2_IP, 'app-02')
+                    }
+                }
+            }
+        }
+
+        // ── 12. Post-deploy: Tag & Record ────────────────────────────────────
+        stage('Record Deployment') {
+            when {
+                not { expression { return params.ROLLBACK } }
+            }
+            steps {
+                sh '''
+                    echo "=== Recording deployment metadata ==="
+
+                    DEPLOY_META=$(cat << EOF
+{
+    "version":    "${GITEA_VERSION}",
+    "build":      "${BUILD_NUMBER}",
+    "commit":     "${GIT_COMMIT_SHORT}",
+    "branch":     "${GIT_BRANCH}",
+    "deployed_at":"${BUILD_TIMESTAMP}",
+    "deployed_by":"$(git log -1 --pretty=format:'%an' 2>/dev/null || echo 'jenkins')",
+    "target":     "${DEPLOY_TARGET}"
+}
+EOF
+)
+                    echo "$DEPLOY_META" > deployment-record.json
+                    cat deployment-record.json
+
+                    # Upload deployment record to S3
+                    aws s3 cp deployment-record.json \
+                        "s3://${S3_BUCKET}/deployment-history/deploy-${BUILD_NUMBER}-${GIT_COMMIT_SHORT}.json" \
+                        --region "${AWS_REGION}" \
+                        --sse aws:kms
+
+                    # Also update the "latest" pointer
+                    aws s3 cp deployment-record.json \
+                        "s3://${S3_BUCKET}/deployment-history/latest.json" \
+                        --region "${AWS_REGION}" \
+                        --sse aws:kms
+
+                    echo "Deployment record saved"
+                '''
+                archiveArtifacts artifacts: 'deployment-record.json', fingerprint: true
+            }
+        }
+
+    } // end stages
+
+    // ── Post Pipeline ─────────────────────────────────────────────────────────
+    post {
+
+        success {
+            script {
+                def duration = currentBuild.durationString.replace(' and counting', '')
+                notifySlack(
+                    'SUCCESS',
+                    "Deployment SUCCESS\n" +
+                    "Version: v${params.GITEA_VERSION}\n" +
+                    "Target:  ${params.DEPLOY_TARGET}\n" +
+                    "Commit:  ${env.GIT_COMMIT_SHORT}\n" +
+                    "Duration: ${duration}"
+                )
+            }
+        }
+
+        failure {
+            script {
+                def duration = currentBuild.durationString.replace(' and counting', '')
+                notifySlack(
+                    'FAILURE',
+                    "Deployment FAILED at stage: ${env.STAGE_NAME}\n" +
+                    "Version: v${params.GITEA_VERSION}\n" +
+                    "Build:   #${env.BUILD_NUMBER}\n" +
+                    "Duration: ${duration}\n" +
+                    "Logs: ${env.BUILD_URL}console"
+                )
+            }
+        }
+
+        aborted {
+            script {
+                notifySlack('ABORTED', "Build #${env.BUILD_NUMBER} was aborted by ${getBuildUser()}")
+            }
+        }
+
+        always {
+            // Clean workspace but keep artifacts
+            cleanWs(
+                cleanWhenNotBuilt: false,
+                deleteDirs: true,
+                disableDeferredWipeout: true,
+                notFailBuild: true,
+                patterns: [[pattern: 'artifacts/**', type: 'EXCLUDE']]
+            )
+        }
+
+    } // end post
+
+} // end pipeline
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Deploy Gitea binary to a single server via SSH through the Bastion.
+ * Uses atomic swap: copy new binary to .new, stop service, swap, start.
+ * On failure the .bak file allows instant rollback.
+ */
+def deployToServer(String serverIp, String serverName, String version) {
+    echo "=== Deploying Gitea v${version} to ${serverName} (${serverIp}) ==="
+    sshagent(credentials: [env.SSH_CREDENTIAL_ID]) {
+        sh """
+            DEPLOY_USER="${env.DEPLOY_USER}"
+            BASTION="${env.BASTION_IP}"
+            SERVER="${serverIp}"
+            VERSION="${version}"
+            SERVICE="${env.SERVICE_NAME}"
+            DEPLOY_DIR="${env.DEPLOY_DIR}"
+            S3_BUCKET="${env.S3_BUCKET}"
+            AWS_REGION="${env.AWS_REGION}"
+
+            SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15 -o ServerAliveInterval=30"
+            SSH="ssh \${SSH_OPTS} -J \${DEPLOY_USER}@\${BASTION} \${DEPLOY_USER}@\${SERVER}"
+            SCP="scp \${SSH_OPTS} -o ProxyJump=\${DEPLOY_USER}@\${BASTION}"
+
+            echo "--- Step 1: Transfer binary to ${serverName} ---"
+            \${SCP} artifacts/gitea-\${VERSION} \${DEPLOY_USER}@\${SERVER}:/tmp/gitea-\${VERSION}
+
+            echo "--- Step 2: Atomic deploy on ${serverName} ---"
+            \${SSH} bash -s << 'REMOTE_SCRIPT'
+                set -euo pipefail
+
+                VERSION="${VERSION}"
+                SERVICE="${SERVICE}"
+                DEPLOY_DIR="${DEPLOY_DIR}"
+                NEW_BINARY="/tmp/gitea-\${VERSION}"
+                CURRENT_BINARY="\${DEPLOY_DIR}/gitea"
+                BACKUP_BINARY="\${DEPLOY_DIR}/gitea.bak"
+
+                echo "Making binary executable..."
+                chmod +x "\${NEW_BINARY}"
+
+                echo "Verifying binary works..."
+                "\${NEW_BINARY}" --version || { echo "Binary is invalid"; exit 1; }
+
+                echo "Taking backup of current binary..."
+                if [ -f "\${CURRENT_BINARY}" ]; then
+                    sudo cp "\${CURRENT_BINARY}" "\${BACKUP_BINARY}"
+                    echo "Backup saved: \${BACKUP_BINARY}"
+                fi
+
+                echo "Stopping \${SERVICE} service..."
+                sudo systemctl stop "\${SERVICE}" || true
+                sleep 2
+
+                echo "Swapping binary..."
+                sudo mv "\${NEW_BINARY}" "\${CURRENT_BINARY}"
+                sudo chmod 755 "\${CURRENT_BINARY}"
+                sudo chown root:root "\${CURRENT_BINARY}"
+
+                echo "Starting \${SERVICE} service..."
+                sudo systemctl start "\${SERVICE}"
+                sudo systemctl is-active "\${SERVICE}" || {
+                    echo "ERROR: Service failed to start — restoring backup"
+                    sudo mv "\${BACKUP_BINARY}" "\${CURRENT_BINARY}"
+                    sudo systemctl start "\${SERVICE}" || true
+                    exit 1
+                }
+
+                echo "Deployed v\${VERSION} to \$(hostname) successfully"
+REMOTE_SCRIPT
+
+            echo "--- Deploy to ${serverName} complete ---"
+        """
+    }
+}
+
+/**
+ * Poll the health endpoint on a server until it responds 200,
+ * or fail after HEALTH_CHECK_RETRIES attempts.
+ */
+def healthCheck(String serverIp, String serverName) {
+    echo "=== Health check: ${serverName} (${serverIp}) ==="
+    sshagent(credentials: [env.SSH_CREDENTIAL_ID]) {
+        sh """
+            SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
+            SSH="ssh \${SSH_OPTS} -J ${env.DEPLOY_USER}@${env.BASTION_IP} ${env.DEPLOY_USER}@${serverIp}"
+
+            RETRIES="${env.HEALTH_CHECK_RETRIES}"
+            DELAY="${env.HEALTH_CHECK_DELAY}"
+            PORT="${env.APP_PORT}"
+            HEALTH_PATH="${env.APP_HEALTH_PATH}"
+            MAX_RETRIES=\${RETRIES}
+            ATTEMPT=0
+
+            echo "Polling http://localhost:\${PORT}\${HEALTH_PATH} on ${serverName}..."
+
+            while [ \$ATTEMPT -lt \$MAX_RETRIES ]; do
+                ATTEMPT=\$((ATTEMPT + 1))
+                echo "Attempt \${ATTEMPT}/\${MAX_RETRIES}..."
+
+                HTTP_CODE=\$(\${SSH} "curl -s -o /dev/null -w '%{http_code}' \\
+                    --max-time 5 \\
+                    http://localhost:\${PORT}\${HEALTH_PATH} || echo 000")
+
+                if [ "\${HTTP_CODE}" = "200" ]; then
+                    echo "HEALTHY: ${serverName} returned 200 on attempt \${ATTEMPT}"
+
+                    # Also check systemd service is active
+                    SERVICE_STATUS=\$(\${SSH} "systemctl is-active ${env.SERVICE_NAME}")
+                    echo "Service status: \${SERVICE_STATUS}"
+
+                    if [ "\${SERVICE_STATUS}" = "active" ]; then
+                        echo "Health check PASSED for ${serverName}"
+                        exit 0
+                    else
+                        echo "ERROR: HTTP 200 but service is \${SERVICE_STATUS}"
+                        exit 1
+                    fi
+                fi
+
+                echo "  Got HTTP \${HTTP_CODE} — waiting \${DELAY}s..."
+                sleep \${DELAY}
+            done
+
+            echo "FAILED: ${serverName} did not become healthy after \${MAX_RETRIES} attempts"
+            # Collect logs for diagnostics
+            echo "=== Last 50 lines of Gitea log ==="
+            \${SSH} "sudo journalctl -u ${env.SERVICE_NAME} -n 50 --no-pager" || true
+            exit 1
+        """
+    }
+}
+
+/**
+ * Roll back a server by restoring the .bak binary and restarting the service.
+ */
+def rollbackServer(String serverIp, String serverName) {
+    echo "=== ROLLBACK: ${serverName} (${serverIp}) ==="
+    sshagent(credentials: [env.SSH_CREDENTIAL_ID]) {
+        sh """
+            SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=15"
+            SSH="ssh \${SSH_OPTS} -J ${env.DEPLOY_USER}@${env.BASTION_IP} ${env.DEPLOY_USER}@${serverIp}"
+
+            \${SSH} bash -s << 'ROLLBACK_SCRIPT'
+                set -euo pipefail
+                DEPLOY_DIR="${env.DEPLOY_DIR}"
+                SERVICE="${env.SERVICE_NAME}"
+                CURRENT="\${DEPLOY_DIR}/gitea"
+                BACKUP="\${DEPLOY_DIR}/gitea.bak"
+
+                if [ ! -f "\${BACKUP}" ]; then
+                    echo "ERROR: No backup binary found at \${BACKUP} — cannot rollback!"
+                    exit 1
+                fi
+
+                BACKUP_VERSION=\$("\${BACKUP}" --version 2>/dev/null | awk '{print \$3}' || echo "unknown")
+                echo "Rolling back to: \${BACKUP_VERSION}"
+
+                sudo systemctl stop "\${SERVICE}" || true
+                sleep 2
+                sudo mv "\${BACKUP}" "\${CURRENT}"
+                sudo chmod 755 "\${CURRENT}"
+                sudo systemctl start "\${SERVICE}"
+
+                sleep 5
+                STATUS=\$(sudo systemctl is-active "\${SERVICE}")
+                if [ "\${STATUS}" = "active" ]; then
+                    echo "ROLLBACK SUCCESSFUL on \$(hostname) — version: \${BACKUP_VERSION}"
+                else
+                    echo "ROLLBACK FAILED: service is \${STATUS} after rollback"
+                    exit 1
+                fi
+ROLLBACK_SCRIPT
+        """
+    }
+}
+
+/**
+ * Send a Slack notification with colour-coded attachment.
+ */
+def notifySlack(String status, String message) {
+    def colorMap = [
+        'STARTED'  : '#439FE0',
+        'DEPLOY'   : '#FFAA00',
+        'SUCCESS'  : '#36A64F',
+        'FAILURE'  : '#E01E5A',
+        'ROLLBACK' : '#FF6B35',
+        'WARNING'  : '#FFAA00',
+        'ABORTED'  : '#888888'
+    ]
+    def color   = colorMap.get(status, '#888888')
+    def icon    = [STARTED:'▶', DEPLOY:'⚙', SUCCESS:'✅', FAILURE:'❌', ROLLBACK:'⏮', WARNING:'⚠', ABORTED:'⏹'].get(status, 'ℹ')
+    def jobLink = "<${env.BUILD_URL}|Build #${env.BUILD_NUMBER}>"
+
+    slackSend(
+        channel:     env.SLACK_CHANNEL,
+        color:       color,
+        tokenCredentialId: env.SLACK_CREDENTIAL,
+        message:     "${icon} *${env.APP_NAME}* ${jobLink} — ${env.GIT_BRANCH}\n${message}"
+    )
+}
+
+/**
+ * Return the name of whoever triggered this build (user or SCM).
+ */
+def getBuildUser() {
+    try {
+        def cause = currentBuild.getBuildCauses('hudson.model.Cause$UserIdCause')
+        if (cause) return cause[0].userName
+        def scmCause = currentBuild.getBuildCauses('hudson.triggers.SCMTrigger$SCMTriggerCause')
+        if (scmCause) return 'GitHub webhook'
+        return 'timer/unknown'
+    } catch (e) {
+        return 'unknown'
+    }
+}

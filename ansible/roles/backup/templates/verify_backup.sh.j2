@@ -1,0 +1,22 @@
+#!/bin/bash
+# verify_backup.sh — managed by Ansible
+set -euo pipefail
+
+S3_BUCKET="{{ s3_bucket }}"
+AWS_REGION="{{ aws_region }}"
+LOG="/opt/backup/logs/verify.log"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG"; }
+
+log "Verifying latest backup exists in S3..."
+
+LATEST=$(aws s3 ls "s3://${S3_BUCKET}/db-backups/" \
+  --recursive --region "${AWS_REGION}" \
+  | sort | tail -1 | awk '{print $4}')
+
+if [ -z "$LATEST" ]; then
+  log "ERROR: No backup found in S3!"
+  exit 1
+fi
+
+log "Latest backup: ${LATEST} — OK"

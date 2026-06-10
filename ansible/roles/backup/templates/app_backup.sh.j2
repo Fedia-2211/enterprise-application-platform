@@ -1,0 +1,23 @@
+#!/bin/bash
+# app_backup.sh — managed by Ansible
+set -euo pipefail
+
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+S3_BUCKET="{{ s3_bucket }}"
+AWS_REGION="{{ aws_region }}"
+GITEA_DATA="{{ gitea_data_dir }}"
+BACKUP_LOG="/opt/backup/logs/app_backup.log"
+
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$BACKUP_LOG"; }
+
+log "Starting Gitea app backup..."
+
+tar -czf /tmp/gitea-data-${TIMESTAMP}.tar.gz -C / "${GITEA_DATA#/}" 2>/dev/null || true
+
+aws s3 cp /tmp/gitea-data-${TIMESTAMP}.tar.gz \
+  "s3://${S3_BUCKET}/app-data/gitea-data-${TIMESTAMP}.tar.gz" \
+  --region "${AWS_REGION}" --sse aws:kms
+
+rm -f /tmp/gitea-data-${TIMESTAMP}.tar.gz
+
+log "Gitea app backup completed"

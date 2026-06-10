@@ -1,0 +1,76 @@
+#!/bin/bash
+# mysql_backup.sh — managed by Ansible
+# Dumps MySQL, compresses, uploads to S3, rotates old backups
+
+set -euo pipefail
+
+BACKUP_TYPE="${1:-incremental}"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+BACKUP_DIR="/opt/backup/mysql"
+S3_BUCKET="{{ s3_bucket }}"
+S3_PREFIX="db-backups"
+RETENTION_DAYS="{{ backup_retention_days }}"
+DB_HOST="{{ db_private_ip }}"
+DB_USER="{{ mysql_app_user }}"
+DB_NAME="{{ mysql_app_db }}"
+LOGFILE="/opt/backup/logs/mysql_backup.log"
+AWS_REGION="{{ aws_region }}"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOGFILE"
+}
+
+send_metric() {
+    aws cloudwatch put-metric-data \
+        --namespace "{{ cloudwatch_metrics_namespace }}" \
+        --metric-name "BackupStatus" \
+        --value "$1" \
+        --dimensions Type=MySQL,Environment={{ environment }} \
+        --region "$AWS_REGION" || true
+}
+
+mkdir -p "$BACKUP_DIR"
+
+log "Starting MySQL $BACKUP_TYPE backup: $DB_NAME"
+
+BACKUP_FILE="${BACKUP_DIR}/${DB_NAME}_${BACKUP_TYPE}_${TIMESTAMP}.sql.gz"
+
+# Dump with single-transaction for InnoDB (no table locks)
+mysqldump \
+    --host="$DB_HOST" \
+    --user="$DB_USER" \
+    --password="{{ mysql_app_password }}" \
+    --single-transaction \
+    --routines \
+    --triggers \
+    --events \
+    --hex-blob \
+    --set-gtid-purged=OFF \
+    "$DB_NAME" | gzip -9 > "$BACKUP_FILE"
+
+BACKUP_SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)
+log "Backup created: $BACKUP_FILE ($BACKUP_SIZE)"
+
+# Verify the backup file is not empty and can be read
+if ! gzip -t "$BACKUP_FILE" 2>/dev/null; then
+    log "ERROR: Backup file is corrupt!"
+    send_metric 0
+    exit 1
+fi
+
+# Upload to S3
+S3_KEY="${S3_PREFIX}/$(date +%Y/%m/%d)/${DB_NAME}_${BACKUP_TYPE}_${TIMESTAMP}.sql.gz"
+aws s3 cp "$BACKUP_FILE" "s3://${S3_BUCKET}/${S3_KEY}" \
+    --region "$AWS_REGION" \
+    --sse aws:kms
+
+log "Uploaded to s3://${S3_BUCKET}/${S3_KEY}"
+
+# Remove local backup after successful upload
+rm -f "$BACKUP_FILE"
+
+# Rotate local backups older than retention period
+find "$BACKUP_DIR" -name "*.sql.gz" -mtime +${RETENTION_DAYS} -delete
+
+send_metric 1
+log "MySQL backup completed successfully"

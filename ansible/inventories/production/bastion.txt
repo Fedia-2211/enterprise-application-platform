@@ -1,0 +1,61 @@
+# SSH to Bastion
+ssh -i ~/.ssh/enterprise-application-platform-key.pem ubuntu@3.94.148.124
+
+# Inside Bastion — install Ansible
+sudo apt update
+sudo apt install -y python3-pip
+pip3 install ansible boto3 botocore
+
+# Install AWS CLI
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+unzip awscliv2.zip
+sudo ./aws/install
+
+# Copy SSH key to Bastion (from your Windows machine)
+# Open a second terminal on Windows and run:
+scp -i ~/.ssh/enterprise-application-platform-key.pem \
+    ~/.ssh/enterprise-application-platform-key.pem \
+    ubuntu@3.94.148.124:~/.ssh/
+# Then back in the Bastion terminal:
+chmod 400 ~/.ssh/enterprise-application-platform-key.pem
+
+# From Windows terminal
+scp -i ~/.ssh/enterprise-application-platform-key.pem \
+    -r /f/devops-portfolio-complete/devops-project/ansible \
+    ubuntu@3.94.148.124:~/ansible
+
+    ---
+all:
+  vars:
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: ~/.ssh/enterprise-application-platform-key.pem
+    ansible_ssh_common_args: '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+
+  children:
+    app_servers:
+      hosts:
+        app-01:
+          ansible_host: 10.0.2.200
+        app-02:
+          ansible_host: 10.0.2.39
+
+    message_queue:
+      hosts:
+        rabbitmq-01:
+          ansible_host: 10.0.2.174
+
+    cache:
+      hosts:
+        memcached-01:
+          ansible_host: 10.0.2.166
+
+    tools:
+      hosts:
+        jenkins-01:
+          ansible_host: 10.0.3.31
+
+    database:
+      hosts:
+        db-01:
+          ansible_host: 10.0.4.163
+          ansible_user: centos

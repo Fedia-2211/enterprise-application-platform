@@ -1,0 +1,50 @@
+# /etc/my.cnf — managed by Ansible
+[mysqld]
+# Basic Settings
+user            = mysql
+datadir         = {{ mysql_data_dir }}
+socket          = /var/lib/mysql/mysql.sock
+bind-address    = {{ mysql_bind_address }}
+port            = 3306
+
+# Character Set
+character-set-server  = utf8mb4
+collation-server      = utf8mb4_unicode_ci
+
+# InnoDB Settings
+innodb_buffer_pool_size       = {{ mysql_innodb_buffer_pool_size }}
+innodb_log_file_size          = 64M
+innodb_flush_log_at_trx_commit = 1
+innodb_flush_method            = O_DIRECT
+innodb_file_per_table          = ON
+
+# Connection Settings
+max_connections      = {{ mysql_max_connections }}
+connect_timeout      = 10
+wait_timeout         = 600
+interactive_timeout  = 600
+max_allowed_packet   = 64M
+
+# Logging
+general_log          = 0
+log_error            = {{ mysql_log_dir }}/error.log
+slow_query_log       = 1
+slow_query_log_file  = {{ mysql_log_dir }}/slow-query.log
+long_query_time      = 2
+log_queries_not_using_indexes = 1
+
+# Security
+local_infile    = 0
+symbolic-links  = 0
+skip_name_resolve = 1
+
+# Performance Schema
+performance_schema = ON
+
+[mysqld_safe]
+log-error = {{ mysql_log_dir }}/error.log
+pid-file  = /var/run/mysqld/mysqld.pid
+
+[client]
+socket   = /var/lib/mysql/mysql.sock
+default-character-set = utf8mb4

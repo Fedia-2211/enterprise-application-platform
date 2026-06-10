@@ -1,0 +1,171 @@
+---
+# roles/mysql/tasks/main.yml
+
+- name: Download MySQL repo rpm
+  ansible.builtin.get_url:
+    url: https://repo.mysql.com/mysql80-community-release-el9-5.noarch.rpm
+    dest: /tmp/mysql80-community-release-el9-5.noarch.rpm
+
+- name: Install MySQL repo rpm
+  ansible.builtin.dnf:
+    name: /tmp/mysql80-community-release-el9-5.noarch.rpm
+    state: present
+    disable_gpg_check: true
+
+- name: Install MySQL server
+  ansible.builtin.dnf:
+    name:
+      - mysql-community-server
+      - mysql-community-client
+      - python3-PyMySQL
+    state: present
+    enablerepo: mysql80-community
+  when: ansible_os_family == "RedHat"
+
+- name: Create MySQL data directory on separate EBS volume
+  ansible.builtin.file:
+    path: "{{ mysql_data_dir }}"
+    state: directory
+    owner: mysql
+    group: mysql
+    mode: "0750"
+
+- name: Create MySQL log directory
+  ansible.builtin.file:
+    path: "{{ mysql_log_dir }}"
+    state: directory
+    owner: mysql
+    group: mysql
+    mode: "0750"
+
+- name: Fix SELinux context on MySQL log directory (CentOS)
+  ansible.builtin.command:
+    cmd: restorecon -Rv /var/log/mysql
+  changed_when: true
+  when: ansible_os_family == "RedHat"
+
+- name: Deploy MySQL configuration
+  ansible.builtin.template:
+    src: my.cnf.j2
+    dest: /etc/my.cnf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: restart mysql
+
+- name: Start and enable MySQL
+  ansible.builtin.service:
+    name: mysqld
+    state: started
+    enabled: true
+
+- name: Get temporary root password (first start)
+  ansible.builtin.shell: |
+    grep 'temporary password' /var/log/mysqld.log | tail -1 | awk '{print $NF}'
+  register: mysql_temp_password
+  changed_when: false
+  no_log: true
+
+- name: Check if root password is already set
+  ansible.builtin.shell: |
+    mysql -u root -p"{{ mysql_root_password }}" -e "SELECT 1;" 2>/dev/null
+    echo $?
+  register: mysql_pw_check
+  changed_when: false
+  no_log: true
+  failed_when: false
+
+- name: Set MySQL root password from temp password
+  ansible.builtin.shell: |
+    TEMP_PASS=$(grep 'temporary password' /var/log/mysqld.log | tail -1 | awk '{print $NF}')
+    if [ -n "$TEMP_PASS" ]; then
+      mysql -u root -p"${TEMP_PASS}" --connect-expired-password \
+        -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';" 2>/dev/null
+    else
+      mysql -u root \
+        -e "ALTER USER 'root'@'localhost' IDENTIFIED BY '{{ mysql_root_password }}';" 2>/dev/null
+    fi
+  no_log: true
+  when: mysql_pw_check.stdout.strip() != "0"
+  failed_when: false
+
+- name: Remove anonymous MySQL users
+  community.mysql.mysql_user:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: ""
+    host_all: true
+    state: absent
+
+- name: Remove MySQL test database
+  community.mysql.mysql_db:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: test
+    state: absent
+
+- name: Disallow remote root login
+  community.mysql.mysql_user:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: root
+    host: "%"
+    state: absent
+
+- name: Create application database
+  community.mysql.mysql_db:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: "{{ mysql_app_db }}"
+    encoding: utf8mb4
+    collation: utf8mb4_unicode_ci
+    state: present
+
+- name: Create application database user
+  community.mysql.mysql_user:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: "{{ mysql_app_user }}"
+    password: "{{ mysql_app_password }}"
+    host: "{{ app_server_1_ip }}"
+    priv: "{{ mysql_app_db }}.*:ALL"
+    state: present
+  no_log: true
+
+- name: Grant app user access from app server 2
+  community.mysql.mysql_user:
+    login_unix_socket: /var/lib/mysql/mysql.sock
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    name: "{{ mysql_app_user }}"
+    password: "{{ mysql_app_password }}"
+    host: "{{ app_server_2_ip }}"
+    priv: "{{ mysql_app_db }}.*:ALL"
+    state: present
+  no_log: true
+
+- name: Configure firewalld for MySQL (CentOS)
+  ansible.posix.firewalld:
+    port: 3306/tcp
+    zone: public
+    permanent: true
+    state: enabled
+    immediate: true
+  when: ansible_os_family == "RedHat"
+
+- name: Enable MySQL binary logging for point-in-time recovery
+  ansible.builtin.lineinfile:
+    path: /etc/my.cnf
+    insertafter: "\\[mysqld\\]"
+    line: "{{ item }}"
+  loop:
+    - "log_bin = /var/log/mysql/mysql-bin.log"
+    - "binlog_expire_logs_seconds = 604800"
+    - "max_binlog_size = 100M"
+    - "server_id = 1"
+  notify: restart mysql

@@ -1,0 +1,81 @@
+---
+- name: Install Java 21
+  ansible.builtin.apt:
+    name: openjdk-21-jdk
+    state: present
+    update_cache: true
+
+- name: Create jenkins user
+  ansible.builtin.user:
+    name: jenkins
+    system: true
+    shell: /bin/bash
+    home: /opt/jenkins
+    create_home: true
+    state: present
+  ignore_errors: true
+
+- name: Create Jenkins directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: jenkins
+    group: jenkins
+    mode: "0755"
+  loop:
+    - /opt/jenkins
+    - /var/log/jenkins
+
+- name: Download Jenkins WAR
+  ansible.builtin.get_url:
+    url: https://get.jenkins.io/war-stable/latest/jenkins.war
+    dest: /opt/jenkins/jenkins.war
+    owner: jenkins
+    group: jenkins
+    mode: "0644"
+
+- name: Deploy Jenkins systemd service
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/jenkins.service
+    content: |
+      [Unit]
+      Description=Jenkins CI
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=jenkins
+      Environment="JENKINS_HOME=/opt/jenkins"
+      ExecStart=/usr/lib/jvm/java-21-openjdk-amd64/bin/java -Xms512m -Xmx1024m -jar /opt/jenkins/jenkins.war --httpPort=8080
+      Restart=on-failure
+      RestartSec=10
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: "0644"
+  notify:
+    - reload systemd
+    - restart jenkins
+
+- name: Start and enable Jenkins
+  ansible.builtin.service:
+    name: jenkins
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Wait for Jenkins to start
+  ansible.builtin.uri:
+    url: http://localhost:8080/login
+    status_code: 200
+  register: jenkins_start
+  until: jenkins_start.status == 200
+  retries: 30
+  delay: 10
+
+- name: Open Jenkins port in UFW
+  community.general.ufw:
+    rule: allow
+    port: "8080"
+    proto: tcp
+    src: "10.0.0.0/16"

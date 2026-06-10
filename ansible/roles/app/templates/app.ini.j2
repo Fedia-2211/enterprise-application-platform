@@ -1,0 +1,83 @@
+; app.ini — Gitea configuration
+; Managed by Ansible — do not edit manually
+
+APP_NAME = DevOps Portfolio — Gitea
+RUN_USER = {{ gitea_user }}
+RUN_MODE = prod
+WORK_PATH = {{ gitea_data_dir }}
+
+[server]
+PROTOCOL        = http
+HTTP_ADDR       = 0.0.0.0
+HTTP_PORT       = {{ app_port }}
+DOMAIN          = {{ app_domain }}
+ROOT_URL        = https://{{ app_domain }}/
+LOCAL_ROOT_URL  = http://localhost:{{ app_port }}/
+DISABLE_SSH     = false
+SSH_PORT        = 22
+LFS_START_SERVER = true
+LFS_CONTENT_PATH = {{ gitea_data_dir }}/lfs
+
+[database]
+DB_TYPE  = mysql
+HOST     = {{ db_private_ip }}:3306
+NAME     = {{ mysql_app_db }}
+USER     = {{ mysql_app_user }}
+PASSWD   = {{ mysql_app_password }}
+SSL_MODE = false
+CHARSET  = utf8mb4
+
+[cache]
+ENABLED  = true
+ADAPTER  = memory
+
+[session]
+PROVIDER        = db
+PROVIDER_CONFIG = {{ gitea_data_dir }}/data/sessions
+
+[queue]
+TYPE = channel
+
+[log]
+MODE      = file, console
+LEVEL     = Info
+ROOT_PATH = {{ gitea_log_dir }}
+
+[log.file]
+FILE_NAME      = {{ gitea_log_dir }}/gitea.log
+LOG_ROTATE     = true
+MAX_SIZE_SHIFT = 28
+DAILY_ROTATE   = true
+MAX_DAYS       = 7
+
+[security]
+INSTALL_LOCK        = true
+SECRET_KEY          = {{ lookup('aws_ssm', '/enterprise-application-platform/production/gitea/secret_key', region=aws_region) }}
+INTERNAL_TOKEN      = {{ lookup('aws_ssm', '/enterprise-application-platform/production/gitea/internal_token', region=aws_region) }}
+MIN_PASSWORD_LENGTH = 12
+PASSWORD_COMPLEXITY = lower,upper,digit,spec
+DISABLE_GIT_HOOKS   = false
+
+[service]
+REGISTER_EMAIL_CONFIRM  = false
+ENABLE_NOTIFY_MAIL      = false
+DISABLE_REGISTRATION    = false
+REQUIRE_SIGNIN_VIEW     = false
+DEFAULT_KEEP_EMAIL_PRIVATE = true
+DEFAULT_ALLOW_CREATE_ORGANIZATION = true
+DEFAULT_ORG_VISIBILITY  = private
+ENABLE_CAPTCHA          = false
+REQUIRE_EXTERNAL_REGISTRATION_PASSWORD = false
+
+[attachment]
+ENABLED   = true
+PATH      = {{ gitea_data_dir }}/data/attachments
+MAX_SIZE  = 100
+MAX_FILES = 10
+
+[picture]
+AVATAR_UPLOAD_PATH = {{ gitea_data_dir }}/data/avatars
+
+[metrics]
+ENABLED = true
+TOKEN   = {{ lookup('aws_ssm', '/enterprise-application-platform/production/gitea/metrics_token', region=aws_region) }}

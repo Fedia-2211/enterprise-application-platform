@@ -1,0 +1,52 @@
+---
+# roles/monitoring/tasks/main.yml
+
+- name: Download CloudWatch agent (Ubuntu)
+  ansible.builtin.get_url:
+    url: "https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb"
+    dest: /tmp/amazon-cloudwatch-agent.deb
+    mode: "0644"
+  when: ansible_os_family == "Debian"
+
+- name: Install CloudWatch agent (Ubuntu)
+  ansible.builtin.apt:
+    deb: /tmp/amazon-cloudwatch-agent.deb
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install CloudWatch agent (CentOS)
+  ansible.builtin.dnf:
+    name: "https://s3.amazonaws.com/amazoncloudwatch-agent/centos/amd64/latest/amazon-cloudwatch-agent.rpm"
+    state: present
+    disable_gpg_check: true
+  when: ansible_os_family == "RedHat"
+
+- name: Create CloudWatch agent config directory
+  ansible.builtin.file:
+    path: /opt/aws/amazon-cloudwatch-agent/etc
+    state: directory
+    mode: "0755"
+
+- name: Deploy CloudWatch agent configuration
+  ansible.builtin.template:
+    src: cloudwatch-agent-config.json.j2
+    dest: /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+    mode: "0644"
+  notify: restart cloudwatch agent
+
+- name: Start and enable CloudWatch agent
+  ansible.builtin.command:
+    cmd: >
+      /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl
+      -a fetch-config
+      -m ec2
+      -s
+      -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json
+  changed_when: true
+  notify: restart cloudwatch agent
+
+- name: Ensure CloudWatch agent service is enabled
+  ansible.builtin.service:
+    name: amazon-cloudwatch-agent
+    state: started
+    enabled: true

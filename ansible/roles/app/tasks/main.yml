@@ -1,0 +1,104 @@
+---
+# roles/app/tasks/main.yml
+
+- name: Create git system group
+  ansible.builtin.group:
+    name: "{{ gitea_group }}"
+    system: true
+    state: present
+
+- name: Create git system user
+  ansible.builtin.user:
+    name: "{{ gitea_user }}"
+    group: "{{ gitea_group }}"
+    system: true
+    shell: /bin/bash
+    home: "{{ gitea_home }}"
+    create_home: true
+    state: present
+
+- name: Create Gitea directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ gitea_user }}"
+    group: "{{ gitea_group }}"
+    mode: "0750"
+  loop:
+    - "{{ gitea_data_dir }}"
+    - "{{ gitea_data_dir }}/custom"
+    - "{{ gitea_data_dir }}/data"
+    - "{{ gitea_data_dir }}/log"
+    - "{{ gitea_data_dir }}/repositories"
+    - "{{ gitea_config_dir }}"
+    - "{{ gitea_log_dir }}"
+
+- name: Ensure gitea config dir is writable by git
+  ansible.builtin.file:
+    path: "{{ gitea_config_dir }}"
+    state: directory
+    owner: git
+    group: git
+    mode: "0770"
+
+- name: Download Gitea binary
+  ansible.builtin.get_url:
+    url: "https://github.com/go-gitea/gitea/releases/download/v{{ gitea_version }}/gitea-{{ gitea_version }}-linux-amd64"
+    dest: /usr/local/bin/gitea
+    mode: "0755"
+    checksum: "sha256:https://github.com/go-gitea/gitea/releases/download/v{{ gitea_version }}/gitea-{{ gitea_version }}-linux-amd64.sha256"
+
+- name: Deploy Gitea app.ini configuration
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: "{{ gitea_config_dir }}/app.ini"
+    owner: git
+    group: git
+    mode: "0660"
+    force: false
+  notify: restart gitea
+
+
+- name: Deploy Gitea systemd service
+  ansible.builtin.template:
+    src: gitea.service.j2
+    dest: /etc/systemd/system/gitea.service
+    mode: "0644"
+    force: false
+  notify:
+    - reload systemd
+    - restart gitea
+
+- name: Run Gitea database migration
+  ansible.builtin.command:
+    cmd: /usr/local/bin/gitea migrate --config {{ gitea_config_dir }}/app.ini
+  become_user: "{{ gitea_user }}"
+  register: gitea_migrate
+  changed_when: "'already' not in gitea_migrate.stdout"
+  failed_when: gitea_migrate.rc != 0
+
+- name: Start and enable Gitea service
+  ansible.builtin.service:
+    name: gitea
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Wait for Gitea to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ app_port }}/api/healthz"
+    status_code: 200
+  register: gitea_health
+  until: gitea_health.status == 200
+  retries: 30
+  delay: 15
+
+- name: Open app port in UFW (from localhost/ALB)
+  community.general.ufw:
+    rule: allow
+    port: "{{ app_port }}"
+    proto: tcp
+    src: "{{ item }}"
+  loop:
+    - "127.0.0.1"
+    - "10.0.1.0/24"

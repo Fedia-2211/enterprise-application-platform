@@ -1,0 +1,6 @@
+-l {{ ansible_default_ipv4.address }}
+-p {{ memcached_port }}
+-m {{ memcached_memory_mb }}
+-c {{ memcached_max_connections }}
+-u memcache
+-U 0
