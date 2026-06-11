@@ -314,7 +314,6 @@ Encountered and resolved during deployment — each added to the lessons-learned
 ## Author
 
 **Firdavs Samadov**
-DevOps & Cloud Engineering Master's Student
-2 years networking (Cisco CCNA 1–3) · 1 year Systems Administration
+DevOps & Cloud Engineering
 
 [GitHub](https://github.com/Fedia-2211) · [LinkedIn](https://www.linkedin.com/in/firdavs-samadov-0b82603b6)
