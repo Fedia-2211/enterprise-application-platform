@@ -18,7 +18,8 @@
 ## Architecture Overview
 
 ```
-![Architecture](Architecture.png.png)
+
+![alt text](Architecture.png)
 ```
 
 ### Network Layout
@@ -266,4 +267,4 @@ Encountered and resolved during deployment — each added to the lessons-learned
 DevOps & Cloud Engineering Master's Student
 2 years networking (Cisco CCNA 1–3) · 1 year Systems Administration
 
-[GitHub](https://github.com/Fedia-2211) · [LinkedIn](#)
+[GitHub](https://github.com/Fedia-2211) · [LinkedIn](https://www.linkedin.com/in/firdavs-samadov-0b82603b6)
