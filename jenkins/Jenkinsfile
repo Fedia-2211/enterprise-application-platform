@@ -16,7 +16,7 @@ pipeline {
         APP_NAME          = "gitea"
         APP_VERSION       = "${env.BUILD_NUMBER}"
         APP_PORT          = "3000"
-        APP_HEALTH_PATH   = "/-/health"
+        APP_HEALTH_PATH   = "/api/healthz"
         DEPLOY_USER       = "ubuntu"
         DEPLOY_DIR        = "/usr/local/bin"
         SERVICE_NAME      = "gitea"
