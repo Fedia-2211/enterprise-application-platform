@@ -18,7 +18,7 @@
 ## Architecture Overview
 
 ```
-![Architecture](docs/screenshots/Architecture.png)
+![Architecture](Architecture.png.png)
 ```
 
 ### Network Layout
