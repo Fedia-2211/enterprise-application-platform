@@ -1,17 +1,20 @@
 # Enterprise Application Platform
 
-**Production-grade 3-tier infrastructure on AWS** — provisioned with Terraform, configured with Ansible, deployed via Jenkins CI/CD. Built to demonstrate end-to-end DevOps engineering: infrastructure as code, configuration management, automated deployments, monitoring, and security hardening.
+**Production-style 3-tier infrastructure on AWS** — provisioned with Terraform, configured with Ansible, deployed via Jenkins CI/CD. Built to demonstrate end-to-end DevOps engineering: infrastructure as code, configuration management, automated deployments, monitoring, and security hardening.
 
 > Infrastructure is destroyed when not in use to minimize AWS costs. Full environment redeploys from scratch in under 25 minutes.
 
 ---
 
-## Live Demo
+## Demo
 
-| Service | URL | Status |
-|---------|-----|--------|
-| Gitea (self-hosted Git) | https://gitea.samadov.xyz | Active when deployed |
-| Jenkins CI/CD | https://jenkins.samadov.xyz | Active when deployed |
+The environment is destroyed between demos to save cost, so these URLs only work while it is deployed.
+See the [screenshots](#screenshots) for the running system.
+
+| Service | URL (when deployed) |
+|---------|---------------------|
+| Gitea (self-hosted Git) | https://gitea.samadov.xyz |
+| Jenkins CI/CD | https://jenkins.samadov.xyz |
 
 ---
 
@@ -109,8 +112,7 @@ enterprise-application-platform/
 │   │   └── production/              # Main entry point
 │   │       ├── main.tf
 │   │       ├── variables.tf
-│   │       ├── outputs.tf
-│   │       └── terraform.tfvars
+│   │       └── outputs.tf
 │   └── modules/
 │       ├── vpc/                     # VPC, subnets, NAT gateway, NACLs, flow logs
 │       ├── compute/                 # EC2 instances — 6 servers
@@ -124,9 +126,9 @@ enterprise-application-platform/
 │   ├── ansible.cfg
 │   ├── inventories/
 │   │   └── production/
-│   │       ├── hosts.yml            # Server inventory with Bastion proxy config
+│   │       ├── hosts.yml.example    # Example inventory (real one: `make inventory`)
 │   │       └── group_vars/
-│   │           └── all.yml          # Variables — secrets pulled from SSM at runtime
+│   │           └── all.yml.example  # Variables — secrets pulled from SSM at runtime
 │   └── roles/
 │       ├── common/                  # Security hardening, UFW, fail2ban, MOTD
 │       ├── nginx/                   # Reverse proxy — Gitea and Jenkins vhosts
@@ -137,10 +139,14 @@ enterprise-application-platform/
 │       ├── jenkins/                 # Jenkins WAR + Java 21 + systemd service
 │       ├── monitoring/              # CloudWatch agent on all 6 servers
 │       └── backup/                  # MySQL dump scripts + S3 upload cron jobs
-└── jenkins/
-    ├── Jenkinsfile                  # 12-stage declarative pipeline (rolling deploy)
-    └── jobs/
-        └── gitea-deploy.groovy      # Job DSL seed script
+├── jenkins/
+│   ├── Jenkinsfile                  # 12-stage declarative pipeline (rolling deploy)
+│   └── jobs/
+│       └── gitea-deploy.groovy      # Job DSL seed script
+├── scripts/
+│   └── generate-inventory.sh        # Builds the Ansible inventory from Terraform outputs
+└── docs/
+    └── bastion-setup.md             # How to run Ansible from the Bastion host
 ```
 
 **Architecture Diagram**
@@ -171,8 +177,14 @@ make ssm-params
 make tf-init
 make tf-apply
 
-# Configure all 6 servers (~15 minutes)
-# Update ansible/inventories/production/hosts.yml with new IPs first
+# Generate the Ansible inventory from Terraform outputs
+make inventory
+
+# Create the variables file and set s3_bucket (terraform output -raw s3_bucket_name)
+cp ansible/inventories/production/group_vars/all.yml.example \
+   ansible/inventories/production/group_vars/all.yml
+
+# Configure all 6 servers (~15 minutes) — run from the Bastion, see docs/bastion-setup.md
 make ansible-deploy
 
 # Verify SSH connectivity
@@ -187,6 +199,7 @@ make tf-plan          # Preview infrastructure changes
 make tf-apply         # Create/update infrastructure
 make tf-destroy       # Tear down everything
 
+make inventory        # Generate hosts.yml from Terraform outputs
 make ansible-deploy   # Configure all servers
 make ansible-app      # Deploy Gitea only
 make ansible-mysql    # Configure MySQL only
@@ -201,14 +214,11 @@ make export-ips       # Export Terraform outputs as env vars
 ### Post-Deploy (once per rebuild)
 
 ```bash
-# Fix ALB health check path
-aws elbv2 modify-target-group \
-  --target-group-arn <ARN> \
-  --health-check-path "/api/healthz"
-
 # Update GoDaddy nameservers to match new Route 53 hosted zone NS records
 # (Route 53 hosted zone is recreated on every terraform destroy/apply)
 ```
+
+The ALB health check path (`/api/healthz`) is set in Terraform (`modules/alb`), so no manual fix is needed.
 
 ---
 
