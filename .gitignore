@@ -13,6 +13,7 @@ terraform.tfvars
 
 # Ansible sensitive
 ansible/inventories/production/group_vars/all.yml
+ansible/inventories/production/hosts.yml
 ansible/logs/
 
 # OS

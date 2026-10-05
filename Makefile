@@ -3,12 +3,13 @@
 # Run `make help` to see all available commands
 
 .PHONY: help tf-init tf-plan tf-apply tf-destroy \
-        ansible-check ansible-deploy ansible-deploy-tag \
+        inventory ansible-check ansible-deploy ansible-deploy-tag \
         ssm-params keys verify-ssh clean
 
 TERRAFORM_DIR := terraform/environments/production
 ANSIBLE_DIR   := ansible
-INVENTORY     := ansible/inventories/production/hosts.yml
+# Relative to ANSIBLE_DIR (the ansible targets cd into it first)
+INVENTORY     := inventories/production/hosts.yml
 AWS_REGION    := us-east-1
 PROJECT       := enterprise-application-platform
 
@@ -29,6 +30,7 @@ help:
 	@echo "  make tf-output    — show all terraform outputs"
 	@echo ""
 	@echo "  $(CYAN)Ansible$(RESET)"
+	@echo "  make inventory             — generate hosts.yml from terraform outputs"
 	@echo "  make ansible-check         — syntax check all playbooks"
 	@echo "  make ansible-deploy        — deploy everything (full run)"
 	@echo "  make ansible-app           — deploy app role only"
@@ -67,6 +69,9 @@ tf-state-list:
 	cd $(TERRAFORM_DIR) && terraform state list
 
 # ── Ansible ───────────────────────────────────────────────────────────────────
+inventory:
+	./scripts/generate-inventory.sh
+
 ansible-check:
 	cd $(ANSIBLE_DIR) && ansible-playbook -i $(INVENTORY) site.yml --syntax-check
 

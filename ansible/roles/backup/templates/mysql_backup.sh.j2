@@ -25,7 +25,7 @@ send_metric() {
         --namespace "{{ cloudwatch_metrics_namespace }}" \
         --metric-name "BackupStatus" \
         --value "$1" \
-        --dimensions Type=MySQL,Environment={{ environment }} \
+        --dimensions Type=MySQL,Environment={{ app_environment }} \
         --region "$AWS_REGION" || true
 }
 
